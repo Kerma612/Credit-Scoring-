@@ -1,0 +1,224 @@
+---
+title: "Untitled"
+author: "Trần Thúy"
+date: "`r Sys.Date()`"
+output: word_document
+---
+```{r}
+library(dplyr)
+library(readr)
+library(InformationValue)
+library(Information)
+library(ROSE)
+library(scorecard)
+library(ROCR)
+```
+
+```{r}
+setwd("D:/NEU/TOKT/Tự chọn/FRM 2")
+set.seed(123)
+data <- read_csv("Bankloan_Cleanedv1.csv")
+
+```
+```{r}
+summary(data)
+colSums(is.na(data))
+
+```
+```{r}
+data.rm<-na.omit(data) 
+summary(data.rm)
+sum(is.na(data.rm))
+data.rm$ed <- as.factor(data.rm$ed)
+```
+
+
+```{r}
+vars_to_plot <- c("age", "employ", "address", "income", "debtinc", "creddebt", "othdebt")
+par(mfrow = c(2, 4))  
+for (var in vars_to_plot) {
+  hist(data.rm[[var]], 
+       main = paste(var), 
+       xlab = var, 
+       col = "lightblue", 
+       breaks = 20, 
+       border = "white")
+  boxplot(data.rm[[var]], 
+          main = paste(var, "- Boxplot"), 
+          col = "lightpink", 
+          horizontal = TRUE)
+}
+
+par(mfrow = c(1, 1))
+
+
+replace_outliers_mean <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_value <- Q3 - Q1
+  
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  
+  mean_value <- mean(x, na.rm = TRUE)
+  
+  x[x < lower_bound | x > upper_bound] <- mean_value
+  
+  return(x)
+}
+
+data_clean <- data.rm
+
+
+data_clean$income <- replace_outliers_mean(data_clean$income)
+data_clean$debtinc <- replace_outliers_mean(data_clean$debtinc)
+data_clean$creddebt <- replace_outliers_mean(data_clean$creddebt)
+data_clean$othdebt <- replace_outliers_mean(data_clean$othdebt)
+
+
+boxplot(data_clean)
+```
+```{r}
+table(data_clean$default)
+prop.table(table(data_clean$default))
+```
+
+```{r}
+data.both <-ovun.sample(default ~ ., data= data_clean,method = "both",p=0.5 , seed = 1)$data
+ table(data.both$default)
+attach(data.both) 
+```
+
+
+```{r}
+table(default)
+prop.table(table(default))
+```
+
+```{r}
+IV <- create_infotables(data = data.both, y = "default", parallel = FALSE)
+print(IV$Summary)
+```
+
+```{r}
+vars_removed <- IV$Summary %>% as.data.frame %>% 
+                                    subset(IV < 0.02) %>% pull(1)
+vars_removed
+```
+```{r}
+data_cal<- data.both %>% select(-all_of(vars_removed))
+
+# train 70% - test 30%
+ind <- sample(2, nrow(data_cal), replace = TRUE, prob = c(0.7, 0.3))
+train.data <- data_cal [ind == 1, ]
+test.data<- data_cal [ind == 2, ]
+```
+
+```{r}
+bins <- woebin(train.data, y = "default")
+woebin_plot(bins)
+```
+```{r}
+train.data_woe <- woebin_ply(train.data, bins)
+```
+
+```{r}
+logit.model <- glm(default ~., family = binomial(link = 'logit'), data = train.data_woe)
+summary(logit.model)
+```
+```{r}
+logit.step <- step(logit.model, direction = "backward", trace = 0)
+summary(logit.step)
+```
+```{r}
+train.prob <- predict(logit.step, type = "response")
+train.pred <- ifelse(train.prob > .5, "1", "0")
+table.train<- table( train.data$default,train.pred)
+table.train
+```
+```{r}
+confusionMatrix.train<-prop.table(table.train)
+confusionMatrix.train
+```
+```{r}
+test.data_woe <- woebin_ply(test.data, bins)
+```
+```{r}
+head(test.data_woe)
+```
+
+```{r}
+test.pred.prob <- predict(logit.model, test.data_woe, type = 'response')
+test.pred<- as.factor(ifelse(test.pred.prob > 0.5, 1, 0))
+table.test<-table(test.data$default,test.pred)
+table.test
+```
+
+```{r}
+confusionMatrix.test<-prop.table(table.test)
+confusionMatrix.test
+
+```
+```{r}
+
+accuracy <- sum(diag(confusionMatrix.test)) / sum(confusionMatrix.test)
+accuracy
+```
+
+```{r}
+sensitivity(test.pred, test.data$default)
+```
+```{r}
+specificity(test.pred, test.data$default)
+```
+```{r}
+misClassError(test.pred, test.data$default, threshold=0.5)
+```
+```{r}
+# Logistic Regression ROC curve
+roc.pred <- prediction(predictions = test.pred.prob, labels = test.data$default)
+roc.perf <- performance(roc.pred, measure = "tpr", x.measure = "fpr")
+# Tính chỉ số AUROC
+AUROC_value <- roc.perf@y.values[[1]]
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+plot(roc.perf, main = "ROC Curve for credit risk Prediction Approaches", col = 2, lwd = 2)
+abline(a = 0, b = 1, lwd = 3, lty = 2, col = 1)
+```
+```{r}
+auc
+```
+```{r}
+# Tính chỉ số AUROC và GINI
+auc <- as.numeric(performance(roc.pred, measure = "auc")@y.values)
+auc
+```
+```{r}
+gini <- 2*auc - 1
+gini
+```
+```{r}
+# Calculate scorecard scores for variables based on the results from woebin and glm: 
+my_card <- scorecard(bins, logit.model, points0 = 600, odds0 = 1/19, pdo = 50)
+head(my_card)
+
+scores <- scorecard_ply(train.data, my_card)
+head(scores)
+hist(scores$score, main = "Phân phối điểm ", xlab = "Credit Score", col = "skyblue")
+scores_test<- scorecard_ply(test.data, my_card)
+hist(scores_test$score, main = "Phân phối điểm ", xlab = "Credit Score", col = "skyblue")
+```
+
+```{r}
+# Calculate scorecard scores
+z_score<-log(train.prob/(1-train.prob))
+head(z_score,10)
+```
+```{r}
+credit_score <-100+2*z_score
+hist(credit_score)
+hist(credit_score, main = "Phân phối điểm ", xlab = "Credit Score", col = "skyblue")
+```
+```{r}
+head(credit_score,10)
+```
+
